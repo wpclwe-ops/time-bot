@@ -18,7 +18,7 @@ PARTNER_NAME = "Callum"
 conn = psycopg2.connect(os.getenv("DATABASE_URL"))
 cursor = conn.cursor()
 
-# ===== TABLE =====
+# ===== DB =====
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS tasks (
     id SERIAL PRIMARY KEY,
@@ -29,17 +29,15 @@ CREATE TABLE IF NOT EXISTS tasks (
     done INTEGER DEFAULT 0
 )
 """)
-
-# 🔥 ВАЖНО — миграция
 cursor.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS repeat TEXT DEFAULT 'none'")
 conn.commit()
 
 # ===== KEYBOARDS =====
 
 main_keyboard = ReplyKeyboardMarkup(
-    [["Add", "Tasks"],
-     ["Today", "Done"],
-     ["Delete"]],
+    [["Add", "Edit"],
+     ["Tasks", "Today"],
+     ["Delete", "Done"]],
     resize_keyboard=True
 )
 
@@ -55,12 +53,19 @@ repeat_keyboard = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-motivation = [
-    "Nice job 💪",
-    "You’re doing amazing 🔥",
-    "Keep going 🚀",
-    "Proud of you ❤️"
-]
+# ===== HELPERS =====
+
+def build_task_keyboard(rows, context):
+    buttons = []
+    context.user_data["task_map"] = {}
+
+    for r in rows:
+        label = f"{r[0]} — {r[1][:20]}"
+        buttons.append([label])
+        context.user_data["task_map"][label] = r[0]
+
+    buttons.append(["Back to menu"])
+    return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
 
 # ===== REMINDER =====
 
@@ -70,10 +75,9 @@ async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.send_message(
         data["chat_id"],
-        f"⏰ {data['text']} 💖"
+        f"⏰ {data['text']} ❤️"
     )
 
-    # DAILY ПОВТОР
     if data["repeat"] == "daily":
         new_time = datetime.fromisoformat(data["time"]) + timedelta(days=1)
 
@@ -130,7 +134,7 @@ async def morning_message(context: ContextTypes.DEFAULT_TYPE):
     rows = cursor.fetchall()
 
     for uid in [MY_ID, PARTNER_ID]:
-        msg = "🌅 Good morning 💖\n\nToday:\n"
+        msg = "🌅 Good morning ❤️\n\nToday:\n"
         found = False
 
         for r in rows:
@@ -146,22 +150,25 @@ async def morning_message(context: ContextTypes.DEFAULT_TYPE):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Hey 💖 I’m your shared planner!\n"
-        "I’ll help you not forget important things 🥰",
+        "Hi! I’m your shared planner ❤️\n"
+        "I’ll help you not forget important things 🥰\n\n"
+        "Let’s plan something together ✨",
         reply_markup=main_keyboard
     )
 
-# ===== FLOW =====
+# ===== MAIN =====
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user_id = update.effective_user.id
 
+    # BACK
     if text == "Back to menu":
         context.user_data.clear()
         await update.message.reply_text("Back ✨", reply_markup=main_keyboard)
         return
 
+    # ADD FLOW
     if text == "Add":
         context.user_data["step"] = "text"
         await update.message.reply_text("📝 Task name?")
@@ -178,7 +185,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             dt = tz.localize(datetime.strptime(text, "%Y-%m-%d %H:%M"))
             context.user_data["task_time"] = dt
             context.user_data["step"] = "user"
-
             await update.message.reply_text("👤 Who?", reply_markup=user_keyboard)
         except:
             await update.message.reply_text("Wrong format 😢")
@@ -199,33 +205,98 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get("step") == "repeat":
         repeat = "daily" if text == "Daily" else "none"
 
-        task_text = context.user_data["task_text"]
-        task_time = context.user_data["task_time"]
-        target_user = context.user_data["target_user"]
-
         cursor.execute(
-            "INSERT INTO tasks (user_id, text, time, repeat) VALUES (%s, %s, %s, %s) RETURNING id",
-            (target_user, task_text, task_time.isoformat(), repeat)
+            "INSERT INTO tasks (user_id, text, time, repeat) VALUES (%s, %s, %s, %s)",
+            (
+                context.user_data["target_user"],
+                context.user_data["task_text"],
+                context.user_data["task_time"].isoformat(),
+                repeat
+            )
         )
-        task_id = cursor.fetchone()[0]
         conn.commit()
 
-        delay = (task_time - datetime.now(tz)).total_seconds()
+        delay = (context.user_data["task_time"] - datetime.now(tz)).total_seconds()
 
         if delay > 0:
             context.job_queue.run_once(
                 send_reminder,
                 when=delay,
                 data={
-                    "chat_id": target_user,
-                    "text": task_text,
-                    "time": task_time.isoformat(),
+                    "chat_id": context.user_data["target_user"],
+                    "text": context.user_data["task_text"],
+                    "time": context.user_data["task_time"].isoformat(),
                     "repeat": repeat
                 }
             )
 
-        await update.message.reply_text(f"Added ✨ (ID: {task_id})", reply_markup=main_keyboard)
+        await update.message.reply_text("Added ✨", reply_markup=main_keyboard)
         context.user_data.clear()
+        return
+
+    # ===== TASKS =====
+
+    if text == "Tasks":
+        cursor.execute("SELECT id,text,time,done FROM tasks ORDER BY time")
+        rows = cursor.fetchall()
+
+        if not rows:
+            await update.message.reply_text("No tasks")
+            return
+
+        msg = "📋 Tasks:\n\n"
+        for r in rows:
+            msg += f"{r[0]}. {r[1]} — {r[2]}\n"
+
+        await update.message.reply_text(msg)
+        return
+
+    # ===== DELETE =====
+
+    if text == "Delete":
+        cursor.execute("SELECT id,text FROM tasks WHERE done=0")
+        rows = cursor.fetchall()
+
+        context.user_data["mode"] = "delete"
+        await update.message.reply_text(
+            "Choose task:",
+            reply_markup=build_task_keyboard(rows, context)
+        )
+        return
+
+    if context.user_data.get("mode") == "delete":
+        task_map = context.user_data.get("task_map", {})
+
+        if text in task_map:
+            cursor.execute("DELETE FROM tasks WHERE id=%s", (task_map[text],))
+            conn.commit()
+            await update.message.reply_text("Deleted ❌", reply_markup=main_keyboard)
+            context.user_data.clear()
+        return
+
+    # ===== DONE =====
+
+    if text == "Done":
+        cursor.execute("SELECT id,text FROM tasks WHERE done=0")
+        rows = cursor.fetchall()
+
+        context.user_data["mode"] = "done"
+        await update.message.reply_text(
+            "Mark done:",
+            reply_markup=build_task_keyboard(rows, context)
+        )
+        return
+
+    if context.user_data.get("mode") == "done":
+        task_map = context.user_data.get("task_map", {})
+
+        if text in task_map:
+            cursor.execute("UPDATE tasks SET done=1 WHERE id=%s", (task_map[text],))
+            conn.commit()
+            await update.message.reply_text(random.choice([
+                "Nice job 💪",
+                "You’re amazing 🔥"
+            ]))
         return
 
 # ===== RUN =====
@@ -236,7 +307,6 @@ app.add_handler(CommandHandler("start", start))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
 app.job_queue.run_daily(morning_message, time=time(hour=9, minute=0, tzinfo=tz))
-
 app.post_init = restore_jobs
 
 app.run_polling()
