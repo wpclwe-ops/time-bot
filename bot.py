@@ -18,6 +18,7 @@ PARTNER_NAME = "Callum"
 conn = psycopg2.connect(os.getenv("DATABASE_URL"))
 cursor = conn.cursor()
 
+# ===== TABLE =====
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS tasks (
     id SERIAL PRIMARY KEY,
@@ -28,7 +29,12 @@ CREATE TABLE IF NOT EXISTS tasks (
     done INTEGER DEFAULT 0
 )
 """)
+
+# 🔥 ВАЖНО — миграция
+cursor.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS repeat TEXT DEFAULT 'none'")
 conn.commit()
+
+# ===== KEYBOARDS =====
 
 main_keyboard = ReplyKeyboardMarkup(
     [["Add", "Tasks"],
@@ -91,10 +97,10 @@ async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
                 }
             )
 
-# ===== RESTORE JOBS =====
+# ===== RESTORE =====
 
 async def restore_jobs(app):
-    cursor.execute("SELECT user_id, text, time, repeat, done FROM tasks WHERE done=0")
+    cursor.execute("SELECT user_id, text, time, repeat FROM tasks WHERE done=0")
     rows = cursor.fetchall()
 
     now = datetime.now(tz)
@@ -145,7 +151,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=main_keyboard
     )
 
-# ===== MAIN =====
+# ===== FLOW =====
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
@@ -231,7 +237,6 @@ app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
 app.job_queue.run_daily(morning_message, time=time(hour=9, minute=0, tzinfo=tz))
 
-# ВОССТАНОВЛЕНИЕ ПОСЛЕ РЕСТАРТА
 app.post_init = restore_jobs
 
 app.run_polling()
