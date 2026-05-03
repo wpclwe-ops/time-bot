@@ -4,7 +4,7 @@ from datetime import datetime, date, timedelta
 import os
 import pytz
 import random
-import sqlite3
+import psycopg2
 
 TOKEN = os.getenv("TOKEN")
 tz = pytz.timezone("Europe/Warsaw")
@@ -15,13 +15,14 @@ PARTNER_ID = 8454213226
 MY_NAME = "Rita"
 PARTNER_NAME = "Callum"
 
-conn = sqlite3.connect("tasks.db", check_same_thread=False)
+# 🔥 POSTGRES
+conn = psycopg2.connect(os.getenv("DATABASE_URL"))
 cursor = conn.cursor()
 
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS tasks (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER,
+    id SERIAL PRIMARY KEY,
+    user_id BIGINT,
     text TEXT,
     time TEXT,
     done INTEGER DEFAULT 0
@@ -59,16 +60,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text
 
-    # ADD
     if text == "Add task":
         await update.message.reply_text(
             f"Task | YYYY-MM-DD HH:MM | {MY_NAME}/{PARTNER_NAME} (optional)"
         )
         return
 
-    # MY TASKS
     if text == "My tasks":
-        cursor.execute("SELECT id, text, time, done FROM tasks WHERE user_id=? ORDER BY time", (user_id,))
+        cursor.execute("SELECT id, text, time, done FROM tasks WHERE user_id=%s ORDER BY time", (user_id,))
         rows = cursor.fetchall()
 
         if not rows:
@@ -84,9 +83,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(msg)
         return
 
-    # PARTNER TASKS
     if text == "Callum tasks":
-        cursor.execute("SELECT id, text, time, done FROM tasks WHERE user_id=?", (PARTNER_ID,))
+        cursor.execute("SELECT id, text, time, done FROM tasks WHERE user_id=%s", (PARTNER_ID,))
         rows = cursor.fetchall()
 
         if not rows:
@@ -102,7 +100,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(msg)
         return
 
-    # ALL TASKS
     if text == "All tasks":
         cursor.execute("SELECT id, text, time, done, user_id FROM tasks ORDER BY time")
         rows = cursor.fetchall()
@@ -116,13 +113,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             t = datetime.fromisoformat(r[2])
             owner = MY_NAME if r[4] == MY_ID else PARTNER_NAME
             status = "✅" if r[3] else "⏳"
-
             msg += f"{r[0]}. {r[1]} — {format_time(t)}\n👤 {owner} {status}\n\n"
 
         await update.message.reply_text(msg)
         return
 
-    # TODAY
     if text == "Today":
         today = date.today()
 
@@ -145,25 +140,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(msg)
         return
 
-    # DELETE
     if text == "Delete task":
         await update.message.reply_text("Send ID")
         context.user_data["mode"] = "delete"
         return
 
-    # DONE
     if text == "Done":
         await update.message.reply_text("Send ID")
         context.user_data["mode"] = "done"
         return
 
-    # EDIT
     if text == "Edit task":
         await update.message.reply_text("ID | new text | YYYY-MM-DD HH:MM")
         context.user_data["mode"] = "edit"
         return
 
-    # MODES
     if context.user_data.get("mode"):
         try:
             mode = context.user_data["mode"]
@@ -174,7 +165,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 new_time = tz.localize(datetime.strptime(new_time.strip(), "%Y-%m-%d %H:%M"))
 
                 cursor.execute(
-                    "UPDATE tasks SET text=?, time=? WHERE id=?",
+                    "UPDATE tasks SET text=%s, time=%s WHERE id=%s",
                     (new_text.strip(), new_time.isoformat(), task_id)
                 )
                 conn.commit()
@@ -184,12 +175,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 task_id = int(text)
 
                 if mode == "delete":
-                    cursor.execute("DELETE FROM tasks WHERE id=?", (task_id,))
+                    cursor.execute("DELETE FROM tasks WHERE id=%s", (task_id,))
                     conn.commit()
                     await update.message.reply_text("Deleted ❌")
 
                 else:
-                    cursor.execute("UPDATE tasks SET done=1 WHERE id=?", (task_id,))
+                    cursor.execute("UPDATE tasks SET done=1 WHERE id=%s", (task_id,))
                     conn.commit()
                     await update.message.reply_text(random.choice(motivation))
 
@@ -200,14 +191,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         return
 
-    # SMART tomorrow
     if "tomorrow" in text.lower():
         text = text.replace(
             "tomorrow",
             (datetime.now(tz) + timedelta(days=1)).strftime("%Y-%m-%d")
         )
 
-    # ADD TASK
     if "|" in text:
         try:
             parts = text.split("|")
@@ -226,12 +215,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     target_user = PARTNER_ID
 
             cursor.execute(
-                "INSERT INTO tasks (user_id, text, time) VALUES (?, ?, ?)",
+                "INSERT INTO tasks (user_id, text, time) VALUES (%s, %s, %s)",
                 (target_user, task_text, task_time.isoformat())
             )
             conn.commit()
 
-            task_id = cursor.lastrowid
+            task_id = cursor.fetchone()
 
             delay = (task_time - datetime.now(tz)).total_seconds()
             sender = MY_NAME if user_id == MY_ID else PARTNER_NAME
@@ -247,19 +236,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     }
                 )
 
-                early = delay - 600
-                if early > 0:
-                    context.job_queue.run_once(
-                        send_reminder,
-                        when=early,
-                        data={
-                            "chat_id": target_user,
-                            "text": f"Soon: {task_text} (from {sender})",
-                            "id": task_id
-                        }
-                    )
-
-            await update.message.reply_text(f"Added (ID: {task_id})")
+            await update.message.reply_text("Added ✅")
 
         except:
             await update.message.reply_text("Wrong format 😢")
@@ -268,7 +245,7 @@ async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
     job = context.job
     await context.bot.send_message(
         job.data["chat_id"],
-        f"⏰ Task #{job.data['id']}: {job.data['text']}"
+        f"⏰ {job.data['text']}"
     )
 
 app = ApplicationBuilder().token(TOKEN).build()
