@@ -18,7 +18,6 @@ PARTNER_NAME = "Callum"
 conn = psycopg2.connect(os.getenv("DATABASE_URL"))
 cursor = conn.cursor()
 
-# ===== DB =====
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS tasks (
     id SERIAL PRIMARY KEY,
@@ -32,12 +31,32 @@ CREATE TABLE IF NOT EXISTS tasks (
 cursor.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS repeat TEXT DEFAULT 'none'")
 conn.commit()
 
+# ===== FORMAT TIME =====
+
+def format_time(t):
+    dt = datetime.fromisoformat(t)
+    return dt.strftime("%d.%m %H:%M")
+
 # ===== KEYBOARDS =====
 
 main_keyboard = ReplyKeyboardMarkup(
     [["Add", "Edit"],
      ["Tasks", "Today"],
      ["Delete", "Done"]],
+    resize_keyboard=True
+)
+
+tasks_keyboard = ReplyKeyboardMarkup(
+    [["All", "My"],
+     ["Rita", "Callum"],
+     ["Back to menu"]],
+    resize_keyboard=True
+)
+
+today_keyboard = ReplyKeyboardMarkup(
+    [["All today", "My today"],
+     ["Rita today", "Callum today"],
+     ["Back to menu"]],
     resize_keyboard=True
 )
 
@@ -53,8 +72,6 @@ repeat_keyboard = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-# ===== HELPERS =====
-
 def build_task_keyboard(rows, context):
     buttons = []
     context.user_data["task_map"] = {}
@@ -66,85 +83,6 @@ def build_task_keyboard(rows, context):
 
     buttons.append(["Back to menu"])
     return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
-
-# ===== REMINDER =====
-
-async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
-    job = context.job
-    data = job.data
-
-    await context.bot.send_message(
-        data["chat_id"],
-        f"⏰ {data['text']} ❤️"
-    )
-
-    if data["repeat"] == "daily":
-        new_time = datetime.fromisoformat(data["time"]) + timedelta(days=1)
-
-        cursor.execute(
-            "INSERT INTO tasks (user_id, text, time, repeat) VALUES (%s, %s, %s, %s)",
-            (data["chat_id"], data["text"], new_time.isoformat(), "daily")
-        )
-        conn.commit()
-
-        delay = (new_time - datetime.now(tz)).total_seconds()
-
-        if delay > 0:
-            context.job_queue.run_once(
-                send_reminder,
-                when=delay,
-                data={
-                    "chat_id": data["chat_id"],
-                    "text": data["text"],
-                    "time": new_time.isoformat(),
-                    "repeat": "daily"
-                }
-            )
-
-# ===== RESTORE =====
-
-async def restore_jobs(app):
-    cursor.execute("SELECT user_id, text, time, repeat FROM tasks WHERE done=0")
-    rows = cursor.fetchall()
-
-    now = datetime.now(tz)
-
-    for r in rows:
-        task_time = datetime.fromisoformat(r[2])
-        delay = (task_time - now).total_seconds()
-
-        if delay > 0:
-            app.job_queue.run_once(
-                send_reminder,
-                when=delay,
-                data={
-                    "chat_id": r[0],
-                    "text": r[1],
-                    "time": r[2],
-                    "repeat": r[3]
-                }
-            )
-
-# ===== MORNING =====
-
-async def morning_message(context: ContextTypes.DEFAULT_TYPE):
-    today = datetime.now(tz).date()
-
-    cursor.execute("SELECT text, time, user_id FROM tasks WHERE done=0")
-    rows = cursor.fetchall()
-
-    for uid in [MY_ID, PARTNER_ID]:
-        msg = "🌅 Good morning ❤️\n\nToday:\n"
-        found = False
-
-        for r in rows:
-            t = datetime.fromisoformat(r[1])
-            if t.date() == today and r[2] == uid:
-                msg += f"• {r[0]} — {t.strftime('%H:%M')}\n"
-                found = True
-
-        if found:
-            await context.bot.send_message(uid, msg)
 
 # ===== START =====
 
@@ -162,13 +100,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user_id = update.effective_user.id
 
-    # BACK
     if text == "Back to menu":
         context.user_data.clear()
         await update.message.reply_text("Back ✨", reply_markup=main_keyboard)
         return
 
     # ADD FLOW
+
     if text == "Add":
         context.user_data["step"] = "text"
         await update.message.reply_text("📝 Task name?")
@@ -216,28 +154,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         conn.commit()
 
-        delay = (context.user_data["task_time"] - datetime.now(tz)).total_seconds()
-
-        if delay > 0:
-            context.job_queue.run_once(
-                send_reminder,
-                when=delay,
-                data={
-                    "chat_id": context.user_data["target_user"],
-                    "text": context.user_data["task_text"],
-                    "time": context.user_data["task_time"].isoformat(),
-                    "repeat": repeat
-                }
-            )
-
         await update.message.reply_text("Added ✨", reply_markup=main_keyboard)
         context.user_data.clear()
         return
 
-    # ===== TASKS =====
+    # TASKS MENU
 
     if text == "Tasks":
-        cursor.execute("SELECT id,text,time,done FROM tasks ORDER BY time")
+        await update.message.reply_text("Choose:", reply_markup=tasks_keyboard)
+        return
+
+    if text in ["All", "My", "Rita", "Callum"]:
+        if text == "All":
+            cursor.execute("SELECT id,text,time FROM tasks")
+        elif text == "My":
+            cursor.execute("SELECT id,text,time FROM tasks WHERE user_id=%s", (user_id,))
+        elif text == "Rita":
+            cursor.execute("SELECT id,text,time FROM tasks WHERE user_id=%s", (MY_ID,))
+        elif text == "Callum":
+            cursor.execute("SELECT id,text,time FROM tasks WHERE user_id=%s", (PARTNER_ID,))
+
         rows = cursor.fetchall()
 
         if not rows:
@@ -246,12 +182,83 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         msg = "📋 Tasks:\n\n"
         for r in rows:
-            msg += f"{r[0]}. {r[1]} — {r[2]}\n"
+            msg += f"{r[0]}. {r[1]} — {format_time(r[2])}\n"
 
         await update.message.reply_text(msg)
         return
 
-    # ===== DELETE =====
+    # TODAY
+
+    if text == "Today":
+        await update.message.reply_text("Choose:", reply_markup=today_keyboard)
+        return
+
+    if "today" in text:
+        today = datetime.now(tz).date()
+        cursor.execute("SELECT id,text,time,user_id FROM tasks WHERE done=0")
+        rows = cursor.fetchall()
+
+        msg = "📅 Today:\n\n"
+        found = False
+
+        for r in rows:
+            t = datetime.fromisoformat(r[2])
+            if t.date() == today:
+                if text == "My today" and r[3] != user_id:
+                    continue
+                if text == "Rita today" and r[3] != MY_ID:
+                    continue
+                if text == "Callum today" and r[3] != PARTNER_ID:
+                    continue
+
+                msg += f"{r[0]}. {r[1]} — {t.strftime('%H:%M')}\n"
+                found = True
+
+        if not found:
+            msg = "No tasks today ✨"
+
+        await update.message.reply_text(msg)
+        return
+
+    # EDIT
+
+    if text == "Edit":
+        cursor.execute("SELECT id,text FROM tasks WHERE done=0")
+        rows = cursor.fetchall()
+
+        context.user_data["mode"] = "edit_select"
+        await update.message.reply_text(
+            "Choose task:",
+            reply_markup=build_task_keyboard(rows, context)
+        )
+        return
+
+    if context.user_data.get("mode") == "edit_select":
+        task_map = context.user_data.get("task_map", {})
+        if text in task_map:
+            context.user_data["edit_id"] = task_map[text]
+            context.user_data["mode"] = "edit"
+            await update.message.reply_text("Send: text | YYYY-MM-DD HH:MM")
+        return
+
+    if context.user_data.get("mode") == "edit":
+        try:
+            new_text, new_time = text.split("|")
+            new_time = tz.localize(datetime.strptime(new_time.strip(), "%Y-%m-%d %H:%M"))
+
+            cursor.execute(
+                "UPDATE tasks SET text=%s, time=%s WHERE id=%s",
+                (new_text.strip(), new_time.isoformat(), context.user_data["edit_id"])
+            )
+            conn.commit()
+
+            await update.message.reply_text("Updated ✏️", reply_markup=main_keyboard)
+            context.user_data.clear()
+        except:
+            await update.message.reply_text("Error 😢")
+        return
+
+    # DELETE
 
     if text == "Delete":
         cursor.execute("SELECT id,text FROM tasks WHERE done=0")
@@ -259,14 +266,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         context.user_data["mode"] = "delete"
         await update.message.reply_text(
-            "Choose task:",
+            "Choose:",
             reply_markup=build_task_keyboard(rows, context)
         )
         return
 
     if context.user_data.get("mode") == "delete":
         task_map = context.user_data.get("task_map", {})
-
         if text in task_map:
             cursor.execute("DELETE FROM tasks WHERE id=%s", (task_map[text],))
             conn.commit()
@@ -274,7 +280,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.clear()
         return
 
-    # ===== DONE =====
+    # DONE
 
     if text == "Done":
         cursor.execute("SELECT id,text FROM tasks WHERE done=0")
@@ -289,14 +295,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if context.user_data.get("mode") == "done":
         task_map = context.user_data.get("task_map", {})
-
         if text in task_map:
             cursor.execute("UPDATE tasks SET done=1 WHERE id=%s", (task_map[text],))
             conn.commit()
-            await update.message.reply_text(random.choice([
-                "Nice job 💪",
-                "You’re amazing 🔥"
-            ]))
+            await update.message.reply_text(random.choice(["Nice 💪", "Good 🔥"]))
         return
 
 # ===== RUN =====
@@ -305,8 +307,5 @@ app = ApplicationBuilder().token(TOKEN).build()
 
 app.add_handler(CommandHandler("start", start))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-app.job_queue.run_daily(morning_message, time=time(hour=9, minute=0, tzinfo=tz))
-app.post_init = restore_jobs
 
 app.run_polling()
