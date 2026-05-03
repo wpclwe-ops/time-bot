@@ -1,4 +1,3 @@
-```python
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 from datetime import datetime, date, timedelta
@@ -284,4 +283,3 @@ app.add_handler(CommandHandler("start", start))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
 app.run_polling()
-```
