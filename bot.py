@@ -268,4 +268,7 @@ app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
 app.post_init = restore_jobs
 
+cursor.execute("SELECT DISTINCT user_id FROM tasks")
+print("USERS:", cursor.fetchall())
+
 app.run_polling()
