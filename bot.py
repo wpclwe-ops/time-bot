@@ -29,31 +29,32 @@ CREATE TABLE IF NOT EXISTS tasks (
 """)
 conn.commit()
 
+# ===== KEYBOARDS =====
+
 main_keyboard = ReplyKeyboardMarkup(
-    [
-        ["Add", "Edit"],
-        ["Tasks", "Today"],
-        ["Delete", "Done"]
-    ],
+    [["Add", "Edit"],
+     ["Tasks", "Today"],
+     ["Delete", "Done"]],
     resize_keyboard=True
 )
 
 tasks_keyboard = ReplyKeyboardMarkup(
-    [
-        ["All tasks", "My tasks"],
-        ["Rita tasks", "Callum tasks"],
-        ["Back"]
-    ],
+    [["All tasks", "My tasks"],
+     ["Rita tasks", "Callum tasks"],
+     ["Back"]],
     resize_keyboard=True
 )
 
 today_keyboard = ReplyKeyboardMarkup(
-    [
-        ["All today", "Rita today"],
-        ["Callum today", "Back"]
-    ],
+    [["All today", "Rita today"],
+     ["Callum today", "Back"]],
     resize_keyboard=True
 )
+
+def build_task_keyboard(rows):
+    buttons = [[str(r[0])] for r in rows]
+    buttons.append(["Cancel"])
+    return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
 
 motivation = [
     "Nice job 💪",
@@ -62,6 +63,8 @@ motivation = [
     "Proud of you ❤️"
 ]
 
+# ===== TIME =====
+
 def parse_time(db_time):
     t = datetime.fromisoformat(db_time.replace("Z", ""))
     return tz.localize(t) if t.tzinfo is None else t.astimezone(tz)
@@ -69,8 +72,12 @@ def parse_time(db_time):
 def format_time(dt):
     return dt.strftime("%Y-%m-%d %H:%M")
 
+# ===== START =====
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Hi! Shared planner 💖", reply_markup=main_keyboard)
+
+# ===== MAIN HANDLER =====
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -94,25 +101,46 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Task | YYYY-MM-DD HH:MM | {MY_NAME}/{PARTNER_NAME}")
         return
 
-    # EDIT
-    if text == "Edit":
-        await update.message.reply_text("ID | new text | YYYY-MM-DD HH:MM")
-        context.user_data["mode"] = "edit"
-        return
-
-    # DELETE
+    # DELETE BUTTONS
     if text == "Delete":
-        await update.message.reply_text("Send ID or multiple IDs (1,2,3)")
-        context.user_data["mode"] = "delete"
+        cursor.execute("SELECT id, text FROM tasks WHERE done=0 ORDER BY time")
+        rows = cursor.fetchall()
+
+        if not rows:
+            await update.message.reply_text("No tasks")
+            return
+
+        context.user_data["mode"] = "delete_buttons"
+        await update.message.reply_text(
+            "Choose task to delete:",
+            reply_markup=build_task_keyboard(rows)
+        )
         return
 
-    # DONE
+    # EDIT BUTTONS
+    if text == "Edit":
+        cursor.execute("SELECT id, text FROM tasks WHERE done=0 ORDER BY time")
+        rows = cursor.fetchall()
+
+        if not rows:
+            await update.message.reply_text("No tasks")
+            return
+
+        context.user_data["mode"] = "edit_select"
+        await update.message.reply_text(
+            "Choose task to edit:",
+            reply_markup=build_task_keyboard(rows)
+        )
+        return
+
+    # DONE MULTI
     if text == "Done":
-        await update.message.reply_text("Send ID or multiple IDs (1,2,3)")
+        await update.message.reply_text("Send IDs (example: 1,2,3)")
         context.user_data["mode"] = "done"
         return
 
-    # TASK LIST FUNCTION
+    # ===== TASK LIST =====
+
     async def show_tasks(query, params, title):
         cursor.execute(query, params)
         rows = cursor.fetchall()
@@ -129,7 +157,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await update.message.reply_text(msg)
 
-    # TASKS
     if text == "All tasks":
         await show_tasks("SELECT id,text,time,done FROM tasks ORDER BY time", (), "📋 All")
         return
@@ -146,7 +173,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_tasks("SELECT id,text,time,done FROM tasks WHERE user_id=%s", (PARTNER_ID,), "📋 Callum")
         return
 
-    # TODAY
+    # ===== TODAY =====
+
     async def show_today(filter_id=None):
         cursor.execute("SELECT id,text,time,user_id FROM tasks WHERE done=0 ORDER BY time")
         rows = cursor.fetchall()
@@ -180,14 +208,35 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_today(PARTNER_ID)
         return
 
-    # MODES
+
+    if context.user_data.get("mode") == "delete_buttons":
+        try:
+            task_id = int(text)
+            cursor.execute("DELETE FROM tasks WHERE id=%s", (task_id,))
+            conn.commit()
+            await update.message.reply_text("Deleted ❌", reply_markup=main_keyboard)
+        except:
+            await update.message.reply_text("Invalid", reply_markup=main_keyboard)
+        context.user_data["mode"] = None
+        return
+
+    if context.user_data.get("mode") == "edit_select":
+        try:
+            task_id = int(text)
+            context.user_data["edit_id"] = task_id
+            context.user_data["mode"] = "edit"
+            await update.message.reply_text("Send: text | YYYY-MM-DD HH:MM", reply_markup=main_keyboard)
+        except:
+            await update.message.reply_text("Invalid")
+        return
+
     if context.user_data.get("mode"):
         try:
             mode = context.user_data["mode"]
 
             if mode == "edit":
-                task_id, new_text, new_time = text.split("|")
-                task_id = int(task_id.strip())
+                task_id = context.user_data.get("edit_id")
+                new_text, new_time = text.split("|")
                 new_time = tz.localize(datetime.strptime(new_time.strip(), "%Y-%m-%d %H:%M"))
 
                 cursor.execute(
@@ -197,20 +246,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 conn.commit()
                 await update.message.reply_text("Updated ✏️")
 
-            else:
+            elif mode == "done":
                 ids = [int(x.strip()) for x in text.split(",")]
-
-                if mode == "delete":
-                    for i in ids:
-                        cursor.execute("DELETE FROM tasks WHERE id=%s", (i,))
-                    conn.commit()
-                    await update.message.reply_text(f"Deleted {len(ids)} tasks ❌")
-
-                elif mode == "done":
-                    for i in ids:
-                        cursor.execute("UPDATE tasks SET done=1 WHERE id=%s", (i,))
-                    conn.commit()
-                    await update.message.reply_text(random.choice(motivation))
+                for i in ids:
+                    cursor.execute("UPDATE tasks SET done=1 WHERE id=%s", (i,))
+                conn.commit()
+                await update.message.reply_text(random.choice(motivation))
 
             context.user_data["mode"] = None
 
@@ -219,14 +260,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         return
 
-    # SMART TOMORROW
+
     if "tomorrow" in text.lower():
         text = text.replace(
             "tomorrow",
             (datetime.now(tz) + timedelta(days=1)).strftime("%Y-%m-%d")
         )
 
-    # ADD TASK
     if "|" in text:
         try:
             parts = [p.strip() for p in text.split("|")]
@@ -251,31 +291,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             task_id = cursor.fetchone()[0]
             conn.commit()
 
-            delay = (task_time - datetime.now(tz)).total_seconds()
-            sender = MY_NAME if user_id == MY_ID else PARTNER_NAME
-
-            if delay > 0:
-                context.job_queue.run_once(
-                    send_reminder,
-                    when=delay,
-                    data={
-                        "chat_id": target_user,
-                        "text": f"{task_text} (from {sender} 💖)",
-                        "id": task_id
-                    }
-                )
-
             await update.message.reply_text(f"Added (ID: {task_id})")
 
         except Exception as e:
             await update.message.reply_text(f"Error: {e}")
 
-async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
-    job = context.job
-    await context.bot.send_message(
-        job.data["chat_id"],
-        f"⏰ Task #{job.data['id']}: {job.data['text']}"
-    )
 
 app = ApplicationBuilder().token(TOKEN).build()
 
