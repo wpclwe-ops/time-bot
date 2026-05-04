@@ -119,9 +119,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user_id = update.effective_user.id
 
+    # ===== WHITELIST =====
     if user_id not in [MY_ID, PARTNER_ID]:
-    await update.message.reply_text("Access denied ❌")
-    return
+        await update.message.reply_text("This bot is private 💔")
+        return
 
     # ===== MODE FIRST (FIX) =====
     if context.user_data.get("mode"):
