@@ -113,7 +113,39 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user_id = update.effective_user.id
 
-    # BACK
+    # ===== MODE FIRST (FIX) =====
+    if context.user_data.get("mode"):
+        task_map = context.user_data.get("task_map", {})
+
+        if text == "Back to menu":
+            context.user_data.clear()
+            await update.message.reply_text("Back ✨", reply_markup=main_keyboard)
+            return
+
+        if text in task_map:
+
+            if context.user_data["mode"] == "delete":
+                cursor.execute("DELETE FROM tasks WHERE id=%s", (task_map[text],))
+                conn.commit()
+                await update.message.reply_text("Deleted ❌", reply_markup=main_keyboard)
+                context.user_data.clear()
+                return
+
+            elif context.user_data["mode"] == "done":
+                cursor.execute("UPDATE tasks SET done=1 WHERE id=%s", (task_map[text],))
+                conn.commit()
+                await update.message.reply_text(random.choice(["Nice 💪", "Good 🔥"]))
+                return
+
+            elif context.user_data["mode"] == "edit_select":
+                context.user_data["edit_id"] = task_map[text]
+                context.user_data["mode"] = "edit"
+                await update.message.reply_text("Send: text | YYYY-MM-DD HH:MM")
+                return
+
+        return
+
+    # ===== BACK =====
     if text == "Back to menu":
         context.user_data.clear()
         await update.message.reply_text("Back ✨", reply_markup=main_keyboard)
@@ -136,10 +168,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             if text.lower() == "today":
                 context.user_data["task_date"] = datetime.now(tz).date()
-
             elif text.lower() == "tomorrow":
                 context.user_data["task_date"] = (datetime.now(tz) + timedelta(days=1)).date()
-
             else:
                 context.user_data["task_date"] = datetime.strptime(text, "%Y-%m-%d").date()
 
@@ -182,15 +212,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if text not in repeat_map:
             return
 
-        repeat = repeat_map[text]
-
         cursor.execute(
             "INSERT INTO tasks (user_id, text, time, repeat) VALUES (%s, %s, %s, %s)",
             (
                 context.user_data["target_user"],
                 context.user_data["task_text"],
                 context.user_data["task_time"].isoformat(),
-                repeat
+                repeat_map[text]
             )
         )
         conn.commit()
@@ -211,10 +239,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif text == "My tasks":
             cursor.execute("SELECT id,text,time FROM tasks WHERE user_id=%s", (user_id,))
         elif text == "Partner tasks":
-            cursor.execute(
-                "SELECT id,text,time FROM tasks WHERE user_id=%s",
-                (get_partner_id(user_id),)
-            )
+            cursor.execute("SELECT id,text,time FROM tasks WHERE user_id=%s", (get_partner_id(user_id),))
 
         rows = cursor.fetchall()
 
@@ -262,6 +287,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(msg)
         return
 
+    # ===== EDIT =====
+
+    if text == "Edit":
+        cursor.execute("SELECT id,text,time FROM tasks WHERE done=0")
+        rows = cursor.fetchall()
+
+        context.user_data["mode"] = "edit_select"
+        await update.message.reply_text("Choose task:", reply_markup=build_task_keyboard(rows, context))
+        return
+
+    if context.user_data.get("mode") == "edit":
+        try:
+            new_text, new_time = text.split("|")
+            new_time = tz.localize(datetime.strptime(new_time.strip(), "%Y-%m-%d %H:%M"))
+
+            cursor.execute(
+                "UPDATE tasks SET text=%s, time=%s WHERE id=%s",
+                (new_text.strip(), new_time.isoformat(), context.user_data["edit_id"])
+            )
+            conn.commit()
+
+            await update.message.reply_text("Updated ✏️", reply_markup=main_keyboard)
+            context.user_data.clear()
+        except:
+            await update.message.reply_text("Error 😢")
+        return
+
     # ===== DELETE =====
 
     if text == "Delete":
@@ -269,19 +321,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rows = cursor.fetchall()
 
         context.user_data["mode"] = "delete"
-        await update.message.reply_text(
-            "Choose:",
-            reply_markup=build_task_keyboard(rows, context)
-        )
-        return
-
-    if context.user_data.get("mode") == "delete":
-        task_map = context.user_data.get("task_map", {})
-        if text in task_map:
-            cursor.execute("DELETE FROM tasks WHERE id=%s", (task_map[text],))
-            conn.commit()
-            await update.message.reply_text("Deleted ❌", reply_markup=main_keyboard)
-            context.user_data.clear()
+        await update.message.reply_text("Choose:", reply_markup=build_task_keyboard(rows, context))
         return
 
     # ===== DONE =====
@@ -291,18 +331,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rows = cursor.fetchall()
 
         context.user_data["mode"] = "done"
-        await update.message.reply_text(
-            "Mark done:",
-            reply_markup=build_task_keyboard(rows, context)
-        )
-        return
-
-    if context.user_data.get("mode") == "done":
-        task_map = context.user_data.get("task_map", {})
-        if text in task_map:
-            cursor.execute("UPDATE tasks SET done=1 WHERE id=%s", (task_map[text],))
-            conn.commit()
-            await update.message.reply_text(random.choice(["Nice 💪", "Good 🔥"]))
+        await update.message.reply_text("Mark done:", reply_markup=build_task_keyboard(rows, context))
         return
 
 # ===== RUN =====
