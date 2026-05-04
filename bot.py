@@ -35,7 +35,17 @@ conn.commit()
 
 def format_time(t):
     dt = datetime.fromisoformat(t)
-    return dt.strftime("%d.%m %H:%M")
+    today = datetime.now(tz).date()
+    tomorrow = today + timedelta(days=1)
+
+    label = dt.strftime("%d.%m %H:%M")
+
+    if dt.date() == today:
+        label += " (today)"
+    elif dt.date() == tomorrow:
+        label += " (tomorrow)"
+
+    return label
 
 def get_partner_id(user_id):
     return PARTNER_ID if user_id == MY_ID else MY_ID
@@ -119,12 +129,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get("step") == "text":
         context.user_data["task_text"] = text
         context.user_data["step"] = "date"
-        await update.message.reply_text("📅 Date (YYYY-MM-DD)")
+        await update.message.reply_text("📅 Date (YYYY-MM-DD / today / tomorrow)")
         return
 
     if context.user_data.get("step") == "date":
         try:
-            context.user_data["task_date"] = datetime.strptime(text, "%Y-%m-%d").date()
+            if text.lower() == "today":
+                context.user_data["task_date"] = datetime.now(tz).date()
+
+            elif text.lower() == "tomorrow":
+                context.user_data["task_date"] = (datetime.now(tz) + timedelta(days=1)).date()
+
+            else:
+                context.user_data["task_date"] = datetime.strptime(text, "%Y-%m-%d").date()
+
             context.user_data["step"] = "time"
             await update.message.reply_text("⏰ Time (HH:MM)")
         except:
@@ -235,7 +253,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if text == "Partner today" and r[3] != get_partner_id(user_id):
                     continue
 
-                msg += f"{r[1]} — {t.strftime('%H:%M')}\n"
+                msg += f"{r[1]} — {format_time(r[2])}\n"
                 found = True
 
         if not found:
