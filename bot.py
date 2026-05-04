@@ -100,6 +100,12 @@ def build_task_keyboard(rows, context):
 # ===== START =====
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+
+    if user_id not in [MY_ID, PARTNER_ID]:
+        await update.message.reply_text("This bot is private 💔")
+        return
+
     await update.message.reply_text(
         "Hi! I’m your shared planner ❤️\n"
         "I’ll help you not forget important things 🥰\n\n"
