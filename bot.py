@@ -113,6 +113,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user_id = update.effective_user.id
 
+    if user_id not in [MY_ID, PARTNER_ID]:
+    await update.message.reply_text("Access denied ❌")
+    return
+
     # ===== MODE FIRST (FIX) =====
     if context.user_data.get("mode"):
         task_map = context.user_data.get("task_map", {})
