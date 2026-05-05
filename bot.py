@@ -47,14 +47,11 @@ def format_time(t):
     dt = datetime.fromisoformat(t)
     today = datetime.now(tz).date()
     tomorrow = today + timedelta(days=1)
-
     label = dt.strftime("%d.%m %H:%M")
-
     if dt.date() == today:
         label += " (today)"
     elif dt.date() == tomorrow:
         label += " (tomorrow)"
-
     return label
 
 def get_partner_id(user_id):
@@ -99,12 +96,10 @@ def build_task_keyboard(rows, user_data):
     # Builds a keyboard of task labels and saves the label→id mapping in user_data.
     buttons = []
     user_data["task_map"] = {}
-
     for r in rows:
         label = f"{r[1][:25]} — {format_time(r[2])}"
         buttons.append([label])
         user_data["task_map"][label] = r[0]
-
     buttons.append(["Back to menu"])
     return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
 
@@ -116,7 +111,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id not in ALLOWED_USERS:
         await update.message.reply_text("This bot is private 💔")
         return
-
     await update.message.reply_text(
         "Hi! I'm your shared planner ❤️\n"
         "I'll help you not forget important things 🥰\n\n"
@@ -124,14 +118,30 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=main_keyboard
     )
 
-# ===== FLOW HANDLERS =====
-# Each function handles one step of a multi-step conversation.
-# Contract: (text, user_data) -> (reply_text, keyboard_or_None)
-# Return (None, None) to silently ignore the message and stay in the current step.
-# user_data holds the state for the current flow (flow name, step name, and any collected values).
+# =============================================================================
+# FLOWS
+# =============================================================================
+# Each section below is self-contained: entry-point command, step handlers,
+# and the dispatch table slices for that flow are all together.
+#
+# Handler contracts:
+#   Command handler:  (user_id, user_data) -> (reply_text, keyboard_or_None)
+#   Step handler:     (text, user_data)    -> (reply_text, keyboard_or_None)
+# Return (None, None) to silently ignore the message (no reply sent).
+#
+# To add a new flow: copy a section as a template, wire it up in the
+# DISPATCH TABLES block at the bottom — nothing else needs to change.
+# =============================================================================
 
-# --- Add flow ---
-# Collects: task name → date → time → who → repeat schedule → saves to DB.
+# ===== ADD FLOW =====
+# Collects task name → date → time → assignee → repeat schedule, then saves to DB.
+# Entry point: user taps "Add" on the main menu.
+
+def handle_cmd_add(user_id, user_data):
+    log.debug("ADD starting")
+    user_data["flow"] = "add"
+    user_data["step"] = "text"
+    return "📝 Task name?", None
 
 def handle_add_text(text, user_data):
     user_data["task_text"] = text
@@ -194,8 +204,26 @@ def handle_add_repeat(text, user_data):
     user_data.clear()
     return "Added ✨", main_keyboard
 
-# --- Edit flow ---
+ADD_COMMANDS = {"Add": handle_cmd_add}
+ADD_STEPS = {
+    "text":   handle_add_text,
+    "date":   handle_add_date,
+    "time":   handle_add_time,
+    "user":   handle_add_user,
+    "repeat": handle_add_repeat,
+}
+
+# ===== EDIT FLOW =====
 # User picks a task from the list, then sends "new text | YYYY-MM-DD HH:MM".
+# Entry point: user taps "Edit" on the main menu.
+
+def handle_cmd_edit(user_id, user_data):
+    log.debug("ROUTE -> Edit mode")
+    cursor.execute("SELECT id,text,time FROM tasks WHERE done=0")
+    rows = cursor.fetchall()
+    user_data["flow"] = "edit"
+    user_data["step"] = "select"
+    return "Choose task:", build_task_keyboard(rows, user_data)
 
 def handle_edit_select(text, user_data):
     task_map = user_data.get("task_map", {})
@@ -224,8 +252,23 @@ def handle_edit_confirm(text, user_data):
         log.warning("EDIT parse error: %r", text)
         return "Error 😢", None
 
-# --- Delete flow ---
+EDIT_COMMANDS = {"Edit": handle_cmd_edit}
+EDIT_STEPS = {
+    "select":  handle_edit_select,
+    "confirm": handle_edit_confirm,
+}
+
+# ===== DELETE FLOW =====
 # User picks a task from the list; it is deleted immediately.
+# Entry point: user taps "Delete" on the main menu.
+
+def handle_cmd_delete(user_id, user_data):
+    log.debug("ROUTE -> Delete mode")
+    cursor.execute("SELECT id,text,time FROM tasks WHERE done=0")
+    rows = cursor.fetchall()
+    user_data["flow"] = "delete"
+    user_data["step"] = "select"
+    return "Choose:", build_task_keyboard(rows, user_data)
 
 def handle_delete_select(text, user_data):
     task_map = user_data.get("task_map", {})
@@ -237,8 +280,21 @@ def handle_delete_select(text, user_data):
     user_data.clear()
     return "Deleted ❌", main_keyboard
 
-# --- Done flow ---
-# User picks a task from the list; it is marked done. Multiple tasks can be marked in one session.
+DELETE_COMMANDS = {"Delete": handle_cmd_delete}
+DELETE_STEPS = {"select": handle_delete_select}
+
+# ===== DONE FLOW =====
+# User picks a task from the list; it is marked done.
+# Multiple tasks can be marked in one session without returning to the menu.
+# Entry point: user taps "Done" on the main menu.
+
+def handle_cmd_done(user_id, user_data):
+    log.debug("ROUTE -> Done mode")
+    cursor.execute("SELECT id,text,time FROM tasks WHERE done=0")
+    rows = cursor.fetchall()
+    user_data["flow"] = "done"
+    user_data["step"] = "select"
+    return "Mark done:", build_task_keyboard(rows, user_data)
 
 def handle_done_select(text, user_data):
     task_map = user_data.get("task_map", {})
@@ -249,72 +305,16 @@ def handle_done_select(text, user_data):
     conn.commit()
     return random.choice(["Nice 💪", "Good 🔥"]), None
 
-# ===== FLOW DISPATCH TABLE =====
-# Maps flow name → step name → handler function.
-# To add a new multi-step flow: add an entry here and write handler functions above.
+DONE_COMMANDS = {"Done": handle_cmd_done}
+DONE_STEPS = {"select": handle_done_select}
 
-FLOWS = {
-    "add": {
-        "text":    handle_add_text,
-        "date":    handle_add_date,
-        "time":    handle_add_time,
-        "user":    handle_add_user,
-        "repeat":  handle_add_repeat,
-    },
-    "edit": {
-        "select":  handle_edit_select,
-        "confirm": handle_edit_confirm,
-    },
-    "delete": {
-        "select":  handle_delete_select,
-    },
-    "done": {
-        "select":  handle_done_select,
-    },
-}
-
-# ===== TOP-LEVEL COMMAND HANDLERS =====
-# These handle single-message commands (main menu buttons and sub-menu buttons).
-# Contract: (user_id, user_data) -> (reply_text, keyboard_or_None)
-# Flow-starting commands set flow/step in user_data to begin a multi-step conversation.
-
-def handle_cmd_add(user_id, user_data):
-    log.debug("ADD starting")
-    user_data["flow"] = "add"
-    user_data["step"] = "text"
-    return "📝 Task name?", None
+# ===== TASKS VIEW =====
+# Read-only: display task lists. No flow state, no DB writes.
+# Entry point: user taps "Tasks" on the main menu, then picks a filter.
 
 def handle_cmd_tasks(user_id, user_data):
     log.debug("ROUTE -> Tasks menu")
     return "Choose:", tasks_keyboard
-
-def handle_cmd_today(user_id, user_data):
-    log.debug("ROUTE -> Today menu")
-    return "Choose:", today_keyboard
-
-def handle_cmd_edit(user_id, user_data):
-    log.debug("ROUTE -> Edit mode")
-    cursor.execute("SELECT id,text,time FROM tasks WHERE done=0")
-    rows = cursor.fetchall()
-    user_data["flow"] = "edit"
-    user_data["step"] = "select"
-    return "Choose task:", build_task_keyboard(rows, user_data)
-
-def handle_cmd_delete(user_id, user_data):
-    log.debug("ROUTE -> Delete mode")
-    cursor.execute("SELECT id,text,time FROM tasks WHERE done=0")
-    rows = cursor.fetchall()
-    user_data["flow"] = "delete"
-    user_data["step"] = "select"
-    return "Choose:", build_task_keyboard(rows, user_data)
-
-def handle_cmd_done(user_id, user_data):
-    log.debug("ROUTE -> Done mode")
-    cursor.execute("SELECT id,text,time FROM tasks WHERE done=0")
-    rows = cursor.fetchall()
-    user_data["flow"] = "done"
-    user_data["step"] = "select"
-    return "Mark done:", build_task_keyboard(rows, user_data)
 
 def handle_cmd_all_tasks(user_id, user_data):
     cursor.execute("SELECT id,text,time FROM tasks")
@@ -339,6 +339,21 @@ def handle_cmd_partner_tasks(user_id, user_data):
         return "No tasks", None
     msg = "📋 Tasks:\n\n" + "".join(f"{r[1]} — {format_time(r[2])}\n" for r in rows)
     return msg, None
+
+TASKS_COMMANDS = {
+    "Tasks":         handle_cmd_tasks,
+    "All tasks":     handle_cmd_all_tasks,
+    "My tasks":      handle_cmd_my_tasks,
+    "Partner tasks": handle_cmd_partner_tasks,
+}
+
+# ===== TODAY VIEW =====
+# Read-only: display tasks due today. No flow state, no DB writes.
+# Entry point: user taps "Today" on the main menu, then picks a filter.
+
+def handle_cmd_today(user_id, user_data):
+    log.debug("ROUTE -> Today menu")
+    return "Choose:", today_keyboard
 
 def handle_cmd_all_today(user_id, user_data):
     today = datetime.now(tz).date()
@@ -370,27 +385,39 @@ def handle_cmd_partner_today(user_id, user_data):
     msg = "📅 Today:\n\n" + "".join(f"{r[1]} — {format_time(r[2])}\n" for r in tasks)
     return msg, None
 
-# ===== COMMAND DISPATCH TABLE =====
-# Maps button text → handler function.
-# To add a new command: add an entry here and write a handler function above.
-
-COMMAND_HANDLERS = {
-    "Add":           handle_cmd_add,
-    "Tasks":         handle_cmd_tasks,
+TODAY_COMMANDS = {
     "Today":         handle_cmd_today,
-    "Edit":          handle_cmd_edit,
-    "Delete":        handle_cmd_delete,
-    "Done":          handle_cmd_done,
-    "All tasks":     handle_cmd_all_tasks,
-    "My tasks":      handle_cmd_my_tasks,
-    "Partner tasks": handle_cmd_partner_tasks,
     "All today":     handle_cmd_all_today,
     "My today":      handle_cmd_my_today,
     "Partner today": handle_cmd_partner_today,
 }
 
-# ===== MESSAGE ROUTER =====
-# Every incoming message passes through here. It checks in order:
+# =============================================================================
+# DISPATCH TABLES
+# =============================================================================
+# Assembled from the per-flow/view dicts above.
+# To add a new flow: add its _COMMANDS and _STEPS entries here.
+
+FLOWS = {
+    "add":    ADD_STEPS,
+    "edit":   EDIT_STEPS,
+    "delete": DELETE_STEPS,
+    "done":   DONE_STEPS,
+}
+
+COMMAND_HANDLERS = {
+    **ADD_COMMANDS,
+    **EDIT_COMMANDS,
+    **DELETE_COMMANDS,
+    **DONE_COMMANDS,
+    **TASKS_COMMANDS,
+    **TODAY_COMMANDS,
+}
+
+# =============================================================================
+# MESSAGE ROUTER
+# =============================================================================
+# Every incoming message passes through here. Checks in order:
 # 1. Is the user allowed?
 # 2. Are they going back to the main menu?
 # 3. Are they mid-flow? Route to the current step's handler.
