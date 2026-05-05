@@ -1,3 +1,5 @@
 python-telegram-bot[job-queue]
 pytz
 psycopg2-binary
+pytest
+pytest-asyncio
