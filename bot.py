@@ -8,6 +8,9 @@ import psycopg2
 import logging
 
 logging.basicConfig(level=logging.DEBUG, format="%(asctime)s [%(levelname)s] %(message)s")
+# Suppress transport-level noise from the HTTP libraries — only show warnings and above
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 log = logging.getLogger(__name__)
 
 TOKEN = os.getenv("TOKEN")
@@ -127,7 +130,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ===== WHITELIST =====
     if user_id not in [MY_ID, PARTNER_ID]:
-        log.debug("WHITELIST REJECT user=%s", user_id)
+        log.warning("WHITELIST REJECT user=%s", user_id)
         await update.message.reply_text("This bot is private 💔")
         return
 
@@ -144,7 +147,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if text in task_map:
 
             if context.user_data["mode"] == "delete":
-                log.debug("DB DELETE task_id=%s", task_map[text])
+                log.info("DB DELETE task_id=%s", task_map[text])
                 cursor.execute("DELETE FROM tasks WHERE id=%s", (task_map[text],))
                 conn.commit()
                 await update.message.reply_text("Deleted ❌", reply_markup=main_keyboard)
@@ -152,7 +155,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
             elif context.user_data["mode"] == "done":
-                log.debug("DB DONE task_id=%s", task_map[text])
+                log.info("DB DONE task_id=%s", task_map[text])
                 cursor.execute("UPDATE tasks SET done=1 WHERE id=%s", (task_map[text],))
                 conn.commit()
                 await update.message.reply_text(random.choice(["Nice 💪", "Good 🔥"]))
@@ -202,7 +205,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             log.debug("ADD step=date -> time, date=%s", context.user_data["task_date"])
             await update.message.reply_text("⏰ Time (HH:MM)")
         except:
-            log.debug("ADD date parse error: %r", text)
+            log.warning("ADD date parse error: %r", text)
             await update.message.reply_text("Wrong format 😢")
         return
 
@@ -215,7 +218,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             log.debug("ADD step=time -> user, time=%s", dt)
             await update.message.reply_text("👤 Who?", reply_markup=user_keyboard)
         except:
-            log.debug("ADD time parse error: %r", text)
+            log.warning("ADD time parse error: %r", text)
             await update.message.reply_text("Wrong time 😢")
         return
 
@@ -244,7 +247,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             log.debug("ADD repeat step: unrecognised value %r, returning silently", text)
             return
 
-        log.debug("DB INSERT task text=%r time=%s repeat=%s", context.user_data["task_text"], context.user_data["task_time"].isoformat(), repeat_map[text])
+        log.info("DB INSERT task text=%r time=%s repeat=%s", context.user_data["task_text"], context.user_data["task_time"].isoformat(), repeat_map[text])
         cursor.execute(
             "INSERT INTO tasks (user_id, text, time, repeat) VALUES (%s, %s, %s, %s)",
             (
@@ -338,7 +341,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             new_text, new_time = text.split("|")
             new_time = tz.localize(datetime.strptime(new_time.strip(), "%Y-%m-%d %H:%M"))
 
-            log.debug("DB EDIT task_id=%s new_text=%r new_time=%s", context.user_data["edit_id"], new_text.strip(), new_time.isoformat())
+            log.info("DB EDIT task_id=%s new_text=%r new_time=%s", context.user_data["edit_id"], new_text.strip(), new_time.isoformat())
             cursor.execute(
                 "UPDATE tasks SET text=%s, time=%s WHERE id=%s",
                 (new_text.strip(), new_time.isoformat(), context.user_data["edit_id"])
@@ -348,7 +351,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Updated ✏️", reply_markup=main_keyboard)
             context.user_data.clear()
         except:
-            log.debug("EDIT parse error: %r", text)
+            log.warning("EDIT parse error: %r", text)
             await update.message.reply_text("Error 😢")
         return
 
