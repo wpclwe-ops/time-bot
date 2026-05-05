@@ -7,103 +7,18 @@ import random
 import psycopg2
 import logging
 
-# ===== LOGGING =====
-# App logs at DEBUG; httpx/httpcore are suppressed to WARNING to avoid transport-level noise.
-logging.basicConfig(level=logging.DEBUG, format="%(asctime)s [%(levelname)s] %(message)s")
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("httpcore").setLevel(logging.WARNING)
-log = logging.getLogger(__name__)
-
-# ===== CONFIG =====
-TOKEN = os.getenv("TOKEN")
-tz = pytz.timezone("Europe/Warsaw")
-
-MY_ID = 319946231
-PARTNER_ID = 8454213226
-MY_NAME = "Rita"
-PARTNER_NAME = "Callum"
-ALLOWED_USERS = {MY_ID, PARTNER_ID}
-
-# ===== DATABASE =====
-conn = psycopg2.connect(os.getenv("DATABASE_URL"))
-cursor = conn.cursor()
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS tasks (
-    id SERIAL PRIMARY KEY,
-    user_id BIGINT,
-    text TEXT,
-    time TEXT,
-    repeat TEXT,
-    done INTEGER DEFAULT 0
-)
-""")
-cursor.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS repeat TEXT DEFAULT 'none'")
-conn.commit()
-
-# ===== HELPERS =====
-
-def format_time(t):
-    dt = datetime.fromisoformat(t)
-    today = datetime.now(tz).date()
-    tomorrow = today + timedelta(days=1)
-    label = dt.strftime("%d.%m %H:%M")
-    if dt.date() == today:
-        label += " (today)"
-    elif dt.date() == tomorrow:
-        label += " (tomorrow)"
-    return label
-
-def get_partner_id(user_id):
-    return PARTNER_ID if user_id == MY_ID else MY_ID
-
-# ===== KEYBOARDS =====
-
-main_keyboard = ReplyKeyboardMarkup(
-    [["Add", "Edit"],
-     ["Tasks", "Today"],
-     ["Delete", "Done"]],
-    resize_keyboard=True
-)
-
-tasks_keyboard = ReplyKeyboardMarkup(
-    [["All tasks", "My tasks"],
-     ["Partner tasks"],
-     ["Back to menu"]],
-    resize_keyboard=True
-)
-
-today_keyboard = ReplyKeyboardMarkup(
-    [["All today", "My today"],
-     ["Partner today"],
-     ["Back to menu"]],
-    resize_keyboard=True
-)
-
-user_keyboard = ReplyKeyboardMarkup(
-    [[MY_NAME, PARTNER_NAME],
-     ["Back to menu"]],
-    resize_keyboard=True
-)
-
-repeat_keyboard = ReplyKeyboardMarkup(
-    [["One-time", "Daily"],
-     ["Weekly", "Back to menu"]],
-    resize_keyboard=True
-)
-
-def build_task_keyboard(rows, user_data):
-    # Builds a keyboard of task labels and saves the label→id mapping in user_data.
-    buttons = []
-    user_data["task_map"] = {}
-    for r in rows:
-        label = f"{r[1][:25]} — {format_time(r[2])}"
-        buttons.append([label])
-        user_data["task_map"][label] = r[0]
-    buttons.append(["Back to menu"])
-    return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
-
-# ===== START COMMAND =====
+# =============================================================================
+# MESSAGE ROUTER
+# =============================================================================
+# Every incoming message passes through handle_message. It checks in order:
+# 1. Is the user allowed?
+# 2. Are they going back to the main menu?
+# 3. Are they mid-flow? Route to the current step's handler.
+# 4. Is it a top-level command button? Route to the command handler.
+#
+# FLOWS and COMMAND_HANDLERS are assembled at the bottom of this file from
+# the per-flow dispatch table slices defined in each flow section below.
+# =============================================================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -118,19 +33,60 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=main_keyboard
     )
 
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    user_id = update.effective_user.id
+    log.debug("MSG user=%s text=%r flow=%s step=%s",
+              user_id, text, context.user_data.get("flow"), context.user_data.get("step"))
+
+    if user_id not in ALLOWED_USERS:
+        log.warning("WHITELIST REJECT user=%s", user_id)
+        await update.message.reply_text("This bot is private 💔")
+        return
+
+    if text == "Back to menu":
+        context.user_data.clear()
+        await update.message.reply_text("Back ✨", reply_markup=main_keyboard)
+        return
+
+    flow = context.user_data.get("flow")
+    step = context.user_data.get("step")
+    if flow and step:
+        if flow in FLOWS and step in FLOWS[flow]:
+            reply, keyboard = FLOWS[flow][step](text, context.user_data)
+            if reply is not None:
+                if keyboard is not None:
+                    await update.message.reply_text(reply, reply_markup=keyboard)
+                else:
+                    await update.message.reply_text(reply)
+        else:
+            log.debug("FLOW=%s STEP=%s: no handler found, ignoring", flow, step)
+        return
+
+    if text in COMMAND_HANDLERS:
+        reply, keyboard = COMMAND_HANDLERS[text](user_id, context.user_data)
+        if reply is not None:
+            if keyboard is not None:
+                await update.message.reply_text(reply, reply_markup=keyboard)
+            else:
+                await update.message.reply_text(reply)
+        return
+
+    log.info("UNMATCHED text=%r user_data=%s", text, dict(context.user_data))
+
 # =============================================================================
 # FLOWS
 # =============================================================================
-# Each section below is self-contained: entry-point command, step handlers,
-# and the dispatch table slices for that flow are all together.
+# Each section is self-contained: entry-point command, step handlers, and the
+# dispatch table slices for that flow are all together.
 #
 # Handler contracts:
 #   Command handler:  (user_id, user_data) -> (reply_text, keyboard_or_None)
 #   Step handler:     (text, user_data)    -> (reply_text, keyboard_or_None)
 # Return (None, None) to silently ignore the message (no reply sent).
 #
-# To add a new flow: copy a section as a template, wire it up in the
-# DISPATCH TABLES block at the bottom — nothing else needs to change.
+# To add a new flow: copy a section as a template, then add its _COMMANDS and
+# _STEPS to the DISPATCH TABLES block at the bottom — nothing else changes.
 # =============================================================================
 
 # ===== ADD FLOW =====
@@ -393,10 +349,111 @@ TODAY_COMMANDS = {
 }
 
 # =============================================================================
-# DISPATCH TABLES
+# SETUP
 # =============================================================================
-# Assembled from the per-flow/view dicts above.
-# To add a new flow: add its _COMMANDS and _STEPS entries here.
+# Everything below runs once at startup. The router and flow handlers above
+# reference these globals at call-time, so definition order doesn't matter —
+# they just need to exist before run_polling() starts accepting messages.
+# =============================================================================
+
+# ----- Logging -----
+logging.basicConfig(level=logging.DEBUG, format="%(asctime)s [%(levelname)s] %(message)s")
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+log = logging.getLogger(__name__)
+
+# ----- Config -----
+TOKEN = os.getenv("TOKEN")
+tz = pytz.timezone("Europe/Warsaw")
+
+MY_ID = 319946231
+PARTNER_ID = 8454213226
+MY_NAME = "Rita"
+PARTNER_NAME = "Callum"
+ALLOWED_USERS = {MY_ID, PARTNER_ID}
+
+# ----- Database -----
+conn = psycopg2.connect(os.getenv("DATABASE_URL"))
+cursor = conn.cursor()
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS tasks (
+    id SERIAL PRIMARY KEY,
+    user_id BIGINT,
+    text TEXT,
+    time TEXT,
+    repeat TEXT,
+    done INTEGER DEFAULT 0
+)
+""")
+cursor.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS repeat TEXT DEFAULT 'none'")
+conn.commit()
+
+# ----- Helpers -----
+
+def format_time(t):
+    dt = datetime.fromisoformat(t)
+    today = datetime.now(tz).date()
+    tomorrow = today + timedelta(days=1)
+    label = dt.strftime("%d.%m %H:%M")
+    if dt.date() == today:
+        label += " (today)"
+    elif dt.date() == tomorrow:
+        label += " (tomorrow)"
+    return label
+
+def get_partner_id(user_id):
+    return PARTNER_ID if user_id == MY_ID else MY_ID
+
+# ----- Keyboards -----
+
+main_keyboard = ReplyKeyboardMarkup(
+    [["Add", "Edit"],
+     ["Tasks", "Today"],
+     ["Delete", "Done"]],
+    resize_keyboard=True
+)
+
+tasks_keyboard = ReplyKeyboardMarkup(
+    [["All tasks", "My tasks"],
+     ["Partner tasks"],
+     ["Back to menu"]],
+    resize_keyboard=True
+)
+
+today_keyboard = ReplyKeyboardMarkup(
+    [["All today", "My today"],
+     ["Partner today"],
+     ["Back to menu"]],
+    resize_keyboard=True
+)
+
+user_keyboard = ReplyKeyboardMarkup(
+    [[MY_NAME, PARTNER_NAME],
+     ["Back to menu"]],
+    resize_keyboard=True
+)
+
+repeat_keyboard = ReplyKeyboardMarkup(
+    [["One-time", "Daily"],
+     ["Weekly", "Back to menu"]],
+    resize_keyboard=True
+)
+
+def build_task_keyboard(rows, user_data):
+    # Builds a keyboard of task labels and saves the label→id mapping in user_data.
+    buttons = []
+    user_data["task_map"] = {}
+    for r in rows:
+        label = f"{r[1][:25]} — {format_time(r[2])}"
+        buttons.append([label])
+        user_data["task_map"][label] = r[0]
+    buttons.append(["Back to menu"])
+    return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
+
+# ----- Dispatch tables -----
+# Assembled from the per-flow slices defined above.
+# To add a new flow: add its _COMMANDS and _STEPS here.
 
 FLOWS = {
     "add":    ADD_STEPS,
@@ -414,61 +471,9 @@ COMMAND_HANDLERS = {
     **TODAY_COMMANDS,
 }
 
-# =============================================================================
-# MESSAGE ROUTER
-# =============================================================================
-# Every incoming message passes through here. Checks in order:
-# 1. Is the user allowed?
-# 2. Are they going back to the main menu?
-# 3. Are they mid-flow? Route to the current step's handler.
-# 4. Is it a top-level command button? Route to the command handler.
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    user_id = update.effective_user.id
-    log.debug("MSG user=%s text=%r flow=%s step=%s",
-              user_id, text, context.user_data.get("flow"), context.user_data.get("step"))
-
-    if user_id not in ALLOWED_USERS:
-        log.warning("WHITELIST REJECT user=%s", user_id)
-        await update.message.reply_text("This bot is private 💔")
-        return
-
-    if text == "Back to menu":
-        context.user_data.clear()
-        await update.message.reply_text("Back ✨", reply_markup=main_keyboard)
-        return
-
-    flow = context.user_data.get("flow")
-    step = context.user_data.get("step")
-    if flow and step:
-        if flow in FLOWS and step in FLOWS[flow]:
-            reply, keyboard = FLOWS[flow][step](text, context.user_data)
-            if reply is not None:
-                if keyboard is not None:
-                    await update.message.reply_text(reply, reply_markup=keyboard)
-                else:
-                    await update.message.reply_text(reply)
-        else:
-            log.debug("FLOW=%s STEP=%s: no handler found, ignoring", flow, step)
-        return
-
-    if text in COMMAND_HANDLERS:
-        reply, keyboard = COMMAND_HANDLERS[text](user_id, context.user_data)
-        if reply is not None:
-            if keyboard is not None:
-                await update.message.reply_text(reply, reply_markup=keyboard)
-            else:
-                await update.message.reply_text(reply)
-        return
-
-    log.info("UNMATCHED text=%r user_data=%s", text, dict(context.user_data))
-
-# ===== RUN =====
+# ----- Run -----
 
 app = ApplicationBuilder().token(TOKEN).build()
-
 app.add_handler(CommandHandler("start", start))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
 app.run_polling()
