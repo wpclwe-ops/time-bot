@@ -91,6 +91,7 @@ async def restore_jobs(app):
                     "repeat": r[3]
                 }
             )
+            
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     log.debug("START user=%s authorised=%s", user_id, user_id in ALLOWED_USERS)
@@ -216,37 +217,55 @@ def handle_add_user(text, user_data):
     return "🔁 Repeat?", repeat_keyboard
 
 def handle_add_repeat(text, user_data):
-    repeat_map = {"One-time": "none", "Daily": "daily", "Weekly": "weekly"}
+    repeat_map = {
+        "One-time": "none",
+        "Daily": "daily",
+        "Weekly": "weekly"
+    }
+
     if text not in repeat_map:
         log.debug("ADD repeat step: unrecognised value %r, ignoring", text)
         return None, None
-    log.info("DB INSERT task text=%r time=%s repeat=%s",
-             user_data["task_text"], user_data["task_time"].isoformat(), repeat_map[text])
+
+    log.info(
+        "DB INSERT task text=%r time=%s repeat=%s",
+        user_data["task_text"],
+        user_data["task_time"].isoformat(),
+        repeat_map[text]
+    )
+
     cursor.execute(
         "INSERT INTO tasks (user_id, text, time, repeat) VALUES (%s, %s, %s, %s)",
-        (user_data["target_user"], user_data["task_text"],
-         user_data["task_time"].isoformat(), repeat_map[text])
+        (
+            user_data["target_user"],
+            user_data["task_text"],
+            user_data["task_time"].isoformat(),
+            repeat_map[text]
+        )
     )
+
     conn.commit()
 
-delay = (
-    user_data["task_time"] - datetime.now(tz)
-).total_seconds()
+    # ===== SCHEDULE REMINDER =====
+    delay = (
+        user_data["task_time"] - datetime.now(tz)
+    ).total_seconds()
 
-if delay > 0:
-    app.job_queue.run_once(
-        send_reminder,
-        when=delay,
-        data={
-            "chat_id": user_data["target_user"],
-            "text": user_data["task_text"],
-            "time": user_data["task_time"].isoformat(),
-            "repeat": repeat_map[text]
-        }
-    )
+    if delay > 0:
+        app.job_queue.run_once(
+            send_reminder,
+            when=delay,
+            data={
+                "chat_id": user_data["target_user"],
+                "text": user_data["task_text"],
+                "time": user_data["task_time"].isoformat(),
+                "repeat": repeat_map[text]
+            }
+        )
 
-user_data.clear()
-return "Added ✨", main_keyboard
+    user_data.clear()
+
+    return "Added ✨", main_keyboard
 
 ADD_COMMANDS = {"Add": handle_cmd_add}
 ADD_STEPS = {
