@@ -19,7 +19,78 @@ import logging
 # FLOWS and COMMAND_HANDLERS are assembled at the bottom of this file from
 # the per-flow dispatch table slices defined in each flow section below.
 # =============================================================================
+# ===== REMINDERS =====
 
+async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
+    job = context.job
+    data = job.data
+
+    await context.bot.send_message(
+        chat_id=data["chat_id"],
+        text=f"⏰ Reminder: {data['text']} ❤️"
+    )
+
+    if data["repeat"] == "daily":
+        new_time = datetime.fromisoformat(data["time"]) + timedelta(days=1)
+
+    elif data["repeat"] == "weekly":
+        new_time = datetime.fromisoformat(data["time"]) + timedelta(days=7)
+
+    else:
+        return
+
+    cursor.execute(
+        "INSERT INTO tasks (user_id, text, time, repeat) VALUES (%s, %s, %s, %s)",
+        (
+            data["chat_id"],
+            data["text"],
+            new_time.isoformat(),
+            data["repeat"]
+        )
+    )
+    conn.commit()
+
+    delay = (new_time - datetime.now(tz)).total_seconds()
+
+    if delay > 0:
+        context.job_queue.run_once(
+            send_reminder,
+            when=delay,
+            data={
+                "chat_id": data["chat_id"],
+                "text": data["text"],
+                "time": new_time.isoformat(),
+                "repeat": data["repeat"]
+            }
+        )
+
+# ===== RESTORE =====
+
+async def restore_jobs(app):
+    cursor.execute(
+        "SELECT user_id, text, time, repeat FROM tasks WHERE done=0"
+    )
+
+    rows = cursor.fetchall()
+
+    now = datetime.now(tz)
+
+    for r in rows:
+        task_time = datetime.fromisoformat(r[2])
+
+        delay = (task_time - now).total_seconds()
+
+        if delay > 0:
+            app.job_queue.run_once(
+                send_reminder,
+                when=delay,
+                data={
+                    "chat_id": r[0],
+                    "text": r[1],
+                    "time": r[2],
+                    "repeat": r[3]
+                }
+            )
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     log.debug("START user=%s authorised=%s", user_id, user_id in ALLOWED_USERS)
@@ -157,8 +228,25 @@ def handle_add_repeat(text, user_data):
          user_data["task_time"].isoformat(), repeat_map[text])
     )
     conn.commit()
-    user_data.clear()
-    return "Added ✨", main_keyboard
+
+delay = (
+    user_data["task_time"] - datetime.now(tz)
+).total_seconds()
+
+if delay > 0:
+    app.job_queue.run_once(
+        send_reminder,
+        when=delay,
+        data={
+            "chat_id": user_data["target_user"],
+            "text": user_data["task_text"],
+            "time": user_data["task_time"].isoformat(),
+            "repeat": repeat_map[text]
+        }
+    )
+
+user_data.clear()
+return "Added ✨", main_keyboard
 
 ADD_COMMANDS = {"Add": handle_cmd_add}
 ADD_STEPS = {
@@ -477,4 +565,5 @@ if __name__ == "__main__":
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.post_init = restore_jobs
     app.run_polling()
